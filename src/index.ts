@@ -17,7 +17,7 @@ import {
     Routes,
     SlashCommandBuilder,
   } from "discord.js";
-  import type { ChatInputCommandInteraction } from "discord.js";
+  import type { Channel, ChatInputCommandInteraction, Message, TextChannel } from "discord.js";
   import * as dotenv from "dotenv";
   import net from "node:net";
   import mysql from "mysql2/promise";
@@ -85,11 +85,64 @@ import {
   // ---------- Discord client ----------
   const client = new Client({ intents: [GatewayIntentBits.Guilds] });
   let lastServerOnline: boolean | null = null;
+  let statusMessageId: string | null = null;
   
   async function gatherStatus(): Promise<{ online: boolean; players: PlayerRow[] }> {
     const online = await isPortOpen(WORLD_HOST, Number(WORLD_PORT));
     const players = online ? await fetchOnlinePlayers().catch(() => []) : [];
     return { online, players };
+  }
+
+  function buildStatusEmbed(online: boolean, players: PlayerRow[]) {
+    const colour: ColorResolvable = online ? "Green" : "Red";
+    const embed = new EmbedBuilder()
+      .setTitle("Состояние сервера CMaNGOS")
+      .setColor(colour)
+      .addFields(
+        { name: "Статус", value: online ? "Онлайн ✅" : "Офлайн ❌", inline: false },
+        { name: "Игроков онлайн", value: String(players.length), inline: false },
+      );
+    if (online && players.length) {
+      embed.addFields({
+        name: "Персонажи",
+        value: players.map((p) => p.name).join("\n").slice(0, 1024),
+        inline: false,
+      });
+    }
+    return embed;
+  }
+
+  async function upsertStatusMessage(channel: TextChannel, online: boolean, players: PlayerRow[],) {
+    const embed = buildStatusEmbed(online, players);
+  
+    // попытка редактировать старое сообщение
+    if (statusMessageId) {
+      try {
+        const msg = await channel.messages.fetch(statusMessageId);
+        await msg.edit({ embeds: [embed] });
+        return;
+      } catch {
+        statusMessageId = null;
+      }
+    }
+  
+    // поиск последнего сообщения бота
+    if (!statusMessageId) {
+      const history = await channel.messages.fetch({ limit: 20 });
+      const found = history.find(
+        (m) => m.author.id === client.user!.id && m.embeds[0]?.title === "Состояние сервера CMaNGOS",
+      );
+      if (found) statusMessageId = found.id;
+    }
+  
+    // создание нового, если не найдено
+    if (!statusMessageId) {
+      const msg: Message = await channel.send({ embeds: [embed] });
+      statusMessageId = msg.id;
+    } else {
+      const msg = await channel.messages.fetch(statusMessageId);
+      await msg.edit({ embeds: [embed] });
+    }
   }
   
   async function updatePresenceOnce(): Promise<void> {
@@ -120,22 +173,7 @@ import {
     await interaction.deferReply({ flags: 1 << 6 /* EPHEMERAL */ });
   
     const { online, players } = await gatherStatus();
-    const colour: ColorResolvable = online ? "Green" : "Red";
-  
-    const embed = new EmbedBuilder()
-      .setTitle("Состояние сервера CMaNGOS")
-      .setColor(colour)
-      .addFields(
-        { name: "Статус", value: online ? "Онлайн ✅" : "Офлайн ❌", inline: false },
-        { name: "Игроков онлайн", value: String(players.length), inline: false },
-      );
-    if (online && players.length) {
-      embed.addFields({
-        name: "Персонажи",
-        value: players.map((p) => p.name).join("\n").slice(0, 1024),
-        inline: false,
-      });
-    }
+    const embed = buildStatusEmbed(online, players);
   
     await interaction.editReply({ embeds: [embed] });
   }
